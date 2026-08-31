@@ -2,7 +2,6 @@
 
 Plataforma IoT completa: un broker MQTT con autenticación contra MongoDB, una API en Express, un dashboard en Nuxt 2 y firmware para ESP32.
 
-> La documentación original de la plantilla de UI (Nuxt Black Dashboard, de Creative Tim) está en el historial de git, en el commit `ReadMe`.
 
 ---
 
