@@ -8,27 +8,48 @@ Plataforma IoT completa: un broker MQTT con autenticación contra MongoDB, una A
 ## Arquitectura
 
 ```
-                    ┌───────────────────────────────────────────────┐
-                    │              SERVICES (Docker)                │
-   ┌────────┐ MQTT  │   ┌─────────┐  auth/ACL   ┌──────────────┐    │
-   │ ESP32  ├───────┼──►│  EMQX   ├────────────►│   MongoDB    │    │
-   │FIRMWARE│ :1883 │   │ 4.4.19  │             │     6.0      │    │
-   └───┬────┘       │   └────┬────┘             └──────▲───────┘    │
-       │            └────────┼─────────────────────────┼────────────┘
-       │ HTTP                │ webhook (reglas)        │ mongoose
-       │ :3001               ▼                         │
-       │            ┌─────────────────┐                │
-       └───────────►│   API Express   ├────────────────┘
-                    │   APP/api :3001 │
-                    └────────▲────────┘
-                             │ axios
-                    ┌────────┴────────┐        MQTT sobre WebSocket :8083
-                    │  Nuxt 2  :3000  │◄──────────────────────────────────
-                    │  APP (frontend) │
-                    └─────────────────┘
+                        ┌─────────────────────────────────────────────────────────┐
+             MQTT :1883 │                    SERVICES (Docker)                    │
+ ┌──────────┐  sdata ►  │    ┌──────────────────────┐    [3]      ┌───────────┐   │
+ │  ESP32   │◄──[2]─────┼───►│     EMQX 4.4.19      ├────────────►│  MongoDB  │   │
+ │ FIRMWARE │ ◄ actdata │    │     broker MQTT      │             │    6.0    │   │
+ └────┬─────┘           │    └─┬─────▲────────────▲─┘             └─────▲─────┘   │
+      │                 └──────┼─────┼────────────┼─────────────────────┼─────────┘
+      │                        │     │            │                     │
+      │                    [4] │     │[5]         │[8]                  │
+      │                   HTTP │     │ HTTP :8085 │MQTT/WS :8083        │
+      │                        │     │ MQTT :1883 │                     │
+      │                 ┌──────▼─────┴──┐         │     [6]             │
+      │ [1] HTTP :3001  │  API Express  ├─────────┼─────────────────────┘
+      └────────────────►│ APP/api :3001 │         │
+                        └───────▲───────┘         │
+                                │                 │
+                                │[7]              │
+                                │HTTP             │
+                        ┌───────┴─────────────────▼────┐
+                        │        Nuxt 2  :3000         │
+                        │        APP (frontend)        │
+                        └──────────────────────────────┘
 ```
 
-**Flujo de datos:** el ESP32 pide sus credenciales MQTT a la API por HTTP, publica telemetría en EMQX, EMQX evalúa reglas y dispara webhooks hacia la API, la API guarda en MongoDB y publica notificaciones que el frontend recibe por WebSocket.
+**Protocolos:** `MQTT :1883` es MQTT directo sobre TCP, lo usan el ESP32 [2] y el cliente superusuario de la API [5]. `MQTT/WS :8083` es MQTT encapsulado en WebSocket [8], porque el navegador no puede abrir conexiones TCP directas. Ambos llegan al mismo broker y comparten los mismos topics, así que un comando publicado por WebSocket le llega al ESP32 por TCP. `HTTP` son peticiones/respuestas: la flecha indica quién inicia la petición.
+
+| # | Conexión | Protocolo | Para qué |
+| --- | --- | --- | --- |
+| 1 | ESP32 → API | HTTP `:3001` | `POST /api/getdevicescredentials`: el dispositivo pide sus credenciales MQTT con `dId` + contraseña |
+| 2 | ESP32 ⇄ EMQX | MQTT `:1883` | Publica telemetría en `.../sdata` y se suscribe a `.../actdata` para recibir comandos |
+| 3 | EMQX → MongoDB | Mongo | Autenticación y ACL de cada cliente MQTT (colección `emqxauthrules`) |
+| 4 | EMQX → API | HTTP (webhook) | Las reglas de EMQX llaman a `/api/saver-webhook` (guardar datos) y `/api/alarm-webhook` (alarmas) |
+| 5 | API → EMQX | HTTP `:8085` + MQTT `:1883` | API de gestión v4 para crear recursos y reglas; y cliente MQTT superusuario que publica las notificaciones `.../notif` |
+| 6 | API ⇄ MongoDB | mongoose | Usuarios, dispositivos, plantillas, datos, reglas y notificaciones |
+| 7 | Frontend → API | HTTP (axios) | Login, CRUD de dispositivos/plantillas/alarmas y obtención de las credenciales MQTT del usuario web |
+| 8 | Frontend ⇄ EMQX | MQTT sobre WebSocket `:8083` | Se suscribe a `.../sdata` y `.../notif`; **publica en `.../actdata` los comandos de los widgets** (botón, switch) |
+
+**Flujo de telemetría:** el ESP32 obtiene sus credenciales por HTTP [1], publica en `sdata` [2]; el frontend lo recibe en tiempo real por WebSocket [8] y, si el payload trae `save: 1`, la regla de EMQX llama al webhook [4] y la API lo guarda en MongoDB [6].
+
+**Flujo de comandos (frontend → ESP32):** la API **no** reenvía los comandos. El frontend primero pide a la API sus credenciales MQTT [7] y luego publica directamente en el broker por WebSocket [8] en `{userId}/{dId}/{variable}/actdata`; EMQX entrega el mensaje al ESP32, que está suscrito a ese topic [2].
+
+**Flujo de alarmas:** una regla de alarma en EMQX llama a `/api/alarm-webhook` [4]; la API guarda la notificación [6] y la publica en `{userId}/dummy-did/dummy-var/notif` [5], que el frontend recibe por WebSocket [8].
 
 ### Estructura del repositorio
 
@@ -43,7 +64,7 @@ Plataforma IoT completa: un broker MQTT con autenticación contra MongoDB, una A
 | Topic | Dirección | Uso |
 | --- | --- | --- |
 | `{userId}/{dId}/{variable}/sdata` | dispositivo → servidor | Telemetría. Se guarda en Mongo si el payload trae `save: 1` |
-| `{userId}/{dId}/{variable}/actdata` | servidor → dispositivo | Comandos hacia actuadores |
+| `{userId}/{dId}/{variable}/actdata` | frontend → dispositivo | Comandos hacia actuadores (los publican los widgets del dashboard) |
 | `{userId}/dummy-did/dummy-var/notif` | API → frontend | Notificaciones de alarmas |
 
 ---

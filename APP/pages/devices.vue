@@ -127,7 +127,6 @@
 import {Table, TableColumn} from "element-ui";
 import {Select, Option} from "element-ui";
 import {BaseSwitch} from '@/components'; // Tomado de la documentacion
-import { create } from "core-js/core/object";
 //import { notify } from "~/api";
 
 
