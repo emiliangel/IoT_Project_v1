@@ -9,7 +9,7 @@
 #define led 2
 
 String dId = "11111";
-String webhook_pass = "BdaLNoMNP5";
+String webhook_pass = "Q5KB7YgcoB";
 // On webhook_endpoint and on mqtt_server, set the public ip of the server, and on local network, set the local ip of the server (the host in this case)
 String webhook_endpoint = "http://192.168.0.102:3001/api/getdevicescredentials";
 const char* mqtt_server = "192.168.0.102";
@@ -44,12 +44,16 @@ void callback(char* topic, byte* payload, unsigned int length);
 void clear();
 void print_stats();
 bool reconnect();
+void toggle_generic_var();
 
 
 
 // Variables de control
 long lastReconnectAttemp = 0;
 long varsLastSend[20] = {};
+unsigned long lastCycle = 0;
+unsigned long lastToggle = 0;
+bool generic_state = false;
 
 
 
@@ -93,8 +97,6 @@ void loop() {
       // put your main code here, to run repeatedly:
   
   check_mqtt_connection();
-  delay (5000);
-  serializeJsonPretty(mqtt_data_doc, Serial);
 }
 
 int prev_temp = 0;
@@ -183,7 +185,7 @@ void process_sensors() {
   //get led status
 
   Serial.println("LED STATUS: " + String(digitalRead(led)));
-  mqtt_data_doc["variables"][4]["last"]["value"] = (HIGH == digitalRead(led));
+  // variables[4] (generic var) is now driven by toggle_generic_var() every 2 s
 
 
 
@@ -307,10 +309,41 @@ void check_mqtt_connection() {
     }
   }else {
       client.loop();
-      process_sensors();
-      send_data_to_broker();
+      toggle_generic_var();
+
+      // Non-blocking 5 s cycle (replaces the old delay(5000) in loop)
+      if (millis() - lastCycle > 5000){
+        lastCycle = millis();
+        process_sensors();
+        send_data_to_broker();
+        serializeJsonPretty(mqtt_data_doc, Serial);
+      }
+
       print_stats();
   }
+}
+
+// Toggles the generic variable (index 4) every 2 seconds and publishes it immediately
+void toggle_generic_var(){
+  if (millis() - lastToggle < 2000){
+    return;
+  }
+  lastToggle = millis();
+
+  generic_state = !generic_state;
+  mqtt_data_doc["variables"][4]["last"]["value"] = generic_state;
+
+  String str_root_topic = mqtt_data_doc["topic"];
+  String str_variable = mqtt_data_doc["variables"][4]["variable"];
+  String topic = str_root_topic + str_variable + "/sdata";
+
+  String toSend = "";
+  serializeJson(mqtt_data_doc["variables"][4]["last"], toSend);
+  client.publish(topic.c_str(), toSend.c_str());
+
+  long counter = mqtt_data_doc["variables"][4]["counter"];
+  counter++;
+  mqtt_data_doc["variables"][4]["counter"] = counter;
 }
 
 bool get_mqtt_credentials() {
@@ -373,19 +406,16 @@ void print_stats()
     lastStats = millis();
     clear();
 
-    Serial.print("\n");
-    Serial.print("\n╔══════════════════════════╗");
-    Serial.print("\n║       SYSTEM STATS       ║");
-    Serial.print("\n╚══════════════════════════╝");
-    Serial.print("\n\n");
-    Serial.print("\n\n");
+    // Use \r\n so every line starts at column 0 (plain \n causes a "staircase" effect)
+    Serial.print("\r\n");
+    Serial.print("\r\n╔══════════════════════════╗");
+    Serial.print("\r\n║       SYSTEM STATS       ║");
+    Serial.print("\r\n╚══════════════════════════╝");
+    Serial.print("\r\n\r\n");
 
-    Serial.print("#");
-    Serial.print(" \t\t Var");
-    Serial.print(" \t\t Type");
-    Serial.print(" \t\t Count");
-    Serial.print(" \t\t Last V");
-    Serial.print("\n\n");
+    // Fixed-width columns instead of tabs so everything lines up
+    Serial.printf("%-4s %-12s %-14s %-8s %-8s %s\r\n", "#", "Name", "Var", "Type", "Count", "Last V");
+    Serial.println("---------------------------------------------------------------------------");
 
     for (int i = 0; i < mqtt_data_doc["variables"].size(); i++)
     {
@@ -396,12 +426,17 @@ void print_stats()
       String lastMsg = mqtt_data_doc["variables"][i]["last"];
       long counter = mqtt_data_doc["variables"][i]["counter"];
 
-      Serial.println(String(i) + " \t " + variableFullName.substring(0,5) + " \t\t " + variable.substring(0,10) + " \t " + variableType.substring(0,5) + " \t\t " + String(counter).substring(0,10) + " \t\t " + lastMsg);
+      Serial.printf("%-4d %-12s %-14s %-8s %-8ld %s\r\n",
+                    i,
+                    variableFullName.substring(0, 12).c_str(),
+                    variable.substring(0, 14).c_str(),
+                    variableType.substring(0, 8).c_str(),
+                    counter,
+                    lastMsg.c_str());
     }
 
-    Serial.printf("\n\n Free RAM -> %u\n", ESP.getFreeHeap()); // I skipped this, I think this restarts the esp32
-    Serial.print(" Bytes");
+    Serial.printf("\r\n\r\n Free RAM -> %u Bytes\r\n", ESP.getFreeHeap());
 
-    Serial.print("\n\n Last Incomming Msg -> " + last_received_msg);
+    Serial.print("\r\n Last Incomming Msg -> " + last_received_msg);
   }
 }
